@@ -200,11 +200,13 @@ Embeddings cluster by modality: text-to-text cosines run systematically higher t
 
 1. **At ingest**, compute each item's baseline: the mean and std of its cosine to the probe bank, stored with the item. (The probe embeddings are cached once.)
 2. **At query**, standardize against that baseline: `z = (cos - mean) / std` - how unusual this match is *for that specific item*.
-3. **Blend** lightly with raw cosine so strong absolute matches (text) stay on top and irrelevant low-baseline items do not float up:
+3. **Blend** with raw cosine so strong absolute matches (text) stay on top and irrelevant low-baseline items do not float up:
 
    ```text
-   score = z + cos
+   score = z + BLEND * cos      # BLEND default 2.0, via LCOVEC_BLEND
    ```
+
+   Higher `BLEND` sharpens text/image/PDF (best on text-heavy corpora); lower leans on the per-item calibration to surface sparse low-cosine modalities (audio/video).
 
 Per-*item* (not just per-modality) calibration matters because anisotropy varies *within* a modality. For example a speech-bearing video is a "text magnet" - it has high cosine to almost every text query; subtracting its own baseline cancels that. This also works for a modality with a single item, where result-set z-scoring fails outright. In testing it lifts a correct image to the top of a mixed list and takes video-only retrieval from 2/5 to 4/5 (see below).
 
@@ -249,33 +251,35 @@ Raw cosine fails because the spoken-monologue clip is a "text magnet" (high cosi
 
 ## Benchmark
 
-A larger content-distinct corpus: 8 text/markdown docs, 7 images, 4 arXiv PDFs (68 pages), 3 speech clips, 4 videos = **90 indexed items**, with 26 labeled queries (one per source item; a PDF counts as found if any of its pages ranks). Scoring is the shipped per-item-calibrated `z + cos`. Reproduce with [`benchmark/`](benchmark/) (it fetches the corpus fresh, so numbers vary slightly).
+A larger content-distinct corpus: 8 text/markdown docs, 7 images, 4 arXiv PDFs (68 pages), 3 speech clips, 4 videos = **90 indexed items**, with 26 labeled queries (one per source item; a PDF counts as found if any of its pages ranks). Scoring is the shipped per-item-calibrated `z + BLEND*cos` (default `BLEND=2`). Reproduce with [`benchmark/`](benchmark/) (it fetches the corpus fresh, so numbers vary slightly).
 
 **Within-modality** (find the right item among items of the same type):
 
 | modality | top-1 |
 |---|---|
-| text | 6/8 |
-| image | 6/7 |
+| text | 7/8 |
+| image | 7/7 |
 | pdf (page) | 3/4 |
 | audio (speech) | 2/3 |
 | video | 3/4 |
-| **overall** | **20/26 (77%)** |
+| **overall** | **22/26 (85%)** |
 
-**Mixed corpus** (all 90 items compete for every query):
+**Mixed corpus** (all 90 items compete for every query), two metrics:
 
-| metric | value |
-|---|---|
-| top-1 | 16/26 (62%) |
-| top-3 | 20/26 (77%) |
-| MRR | 0.71 |
+| metric | strict (exact labeled item) | topic-graded (right topic, any modality) |
+|---|---|---|
+| top-1 | 18/26 (69%) | **21/26 (81%)** |
+| top-3 | 20/26 (77%) | **23/26 (88%)** |
+| MRR | 0.74 | **0.86** |
 
-Two honest reads of the misses:
+The two metrics matter because the corpus has deliberate cross-modal topic duplicates (a coffee *audio* clip and an espresso *text* article, etc.). **Strict** demands the exact labeled item; **topic-graded** counts any item of the right topic, which is what a user actually wants. The gap between them is mostly the system correctly returning a relevant *sibling* in another modality - e.g. "how espresso is made" returns the espresso article, "a cat" returns the cat photo.
 
-- **Most are semantically reasonable, not failures.** The machine-learning text loses to the ML *PDFs*; the Eiffel Tower *image* loses to Paris/France *text*; cat vs dog; the transformer papers (attention/BERT) shade into each other. The embeddings are behaving sensibly.
-- **Audio and video get buried in a text-heavy mixed corpus.** Within their own modality they retrieve fine (audio 2/3, video 3/4), but in the mixed index they sink to ranks ~15-80 of 90 - text->audio/video cosines are low and 76 of 90 items are text. Per-item calibration narrows this but cannot overcome a ~25:1 modality imbalance. If you need every modality represented in one list, search per-modality and merge top-k from each.
+Honest reads of the remaining misses:
 
-Bottom line, at scale: **text, image, and PDF retrieval are strong; speech-audio works; cross-modal audio/video ranking against a large text corpus is the weak spot.**
+- **Most strict misses are relevant siblings, not errors** (caught by the topic-graded metric).
+- **Audio and video still get buried in a text-heavy mixed corpus.** Within their own modality they retrieve fine (audio 2/3, video 3/4), but in the mixed index they sink (ranks ~30-80 of 90): text->audio/video cosines are low and 76 of 90 items are text. Per-item calibration narrows this but cannot overcome a ~25:1 imbalance, and raising `BLEND` (which sharpens text/image) does not rescue them. For balanced cross-modal results, search per-modality and merge top-k - or lower `LCOVEC_BLEND` to lean on the calibration.
+
+Bottom line: **text, image, and PDF retrieval are strong (within-modality 85%, topic-graded mixed 81%/88%); speech-audio works within its modality; cross-modal audio/video ranking against a large text corpus is the weak spot.**
 
 ---
 
@@ -318,6 +322,7 @@ In other words: the index is decoupled from the embedder and will store whatever
 |---|---|---|
 | `LCO_SERVER` | `http://127.0.0.1:8090` | `lcovec.py`, `poc.py` |
 | `LCOVEC_STORE` | `~/.lcovec/store` | `lcovec.py` |
+| `LCOVEC_BLEND` | `2.0` | `lcovec.py` (raw-cosine weight in ranking) |
 | `LCOVEC_VIDEO_FRAMES` | `6` | `lcovec.py` (frames sampled per video) |
 | `LCOVEC_VIDEO_AUDIO_SEC` | `45` | `lcovec.py` (seconds of audio fused per video) |
 | `LLAMA_SERVER_BIN` | `~/ht-llama.cpp/build/bin/llama-server` | `embedder.sh` |

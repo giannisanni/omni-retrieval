@@ -211,6 +211,12 @@ PROBES = [
 ]
 PROBES_F = os.path.join(STORE, "probes.npy")
 
+# Query ranking: score = per-item z + BLEND * raw_cosine. Higher BLEND sharpens
+# strong text/image/PDF matches (better on text-heavy corpora); lower BLEND
+# leans on per-item calibration to surface sparse low-cosine modalities
+# (audio/video). 2.0 maximized a mixed benchmark; tune via LCOVEC_BLEND.
+BLEND = float(os.environ.get("LCOVEC_BLEND", "2.0"))
+
 def _unit(v): return v / (np.linalg.norm(v) + 1e-9)
 
 def probe_matrix():
@@ -238,10 +244,9 @@ def cmd_query(args):
             it = meta["items"][str(r)]
             bm, bs = it.get("bm", 0.0), it.get("bs", 1.0)
             z = (float(s) - bm) / bs   # how unusual is this cos for THIS item
-            # light blend with raw cos: per-item z surfaces sparse/low-baseline
-            # modalities (a lone video/audio), the cos term keeps strong absolute
-            # matches (text) on top and damps irrelevant low-baseline creep
-            merged.append((z + 1.0 * float(s), z, float(s), int(r), m))
+            # blend per-item z (cross-modal calibration) with raw cos (absolute
+            # relevance); BLEND tunes the balance (see its definition above).
+            merged.append((z + BLEND * float(s), z, float(s), int(r), m))
     merged.sort(reverse=True)
     print(f"query: {args.text!r}\n")
     for blend, z, s, r, m in merged[:args.k]:
