@@ -54,41 +54,57 @@ def _post(payload, what):
     if v.shape[0] != DIM: raise RuntimeError(f"dim {v.shape[0]} != {DIM}")
     return v.astype(np.float32)
 
+# video: sample this many frames evenly across the clip, plus up to this many
+# seconds of audio, and fuse them into ONE vector (must fit the server's -c 8192).
+VIDEO_FRAMES   = int(os.environ.get("LCOVEC_VIDEO_FRAMES", "6"))
+VIDEO_AUDIO_SEC = int(os.environ.get("LCOVEC_VIDEO_AUDIO_SEC", "45"))
+
+def _b64(p): return base64.b64encode(open(p, "rb").read()).decode()
+
 def embed_text(t): return _post({"content": t}, "text")
 def embed_media(p): return _post({"content": {"prompt_string": "<__media__>",
-                    "multimodal_data": [base64.b64encode(open(p, "rb").read()).decode()]}}, p)
+                                  "multimodal_data": [_b64(p)]}}, p)
+
+def embed_fused(paths, what):
+    """Embed several media files (e.g. video frames + audio track) into one vector."""
+    items = [_b64(p) for p in paths]
+    return _post({"content": {"prompt_string": "<__media__>" * len(items),
+                              "multimodal_data": items}}, what)
 
 def _ff(args):
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *args], check=True)
 
-def derive(path, modality):
-    """Return list of sub-items to embed: {modality, kind('text'|'media'), payload, preview, from_video}."""
-    if modality == "text":
-        txt = open(path, errors="replace").read()
-        return [{"modality": "text", "kind": "text", "payload": txt[:8000],
-                 "preview": txt[:80].replace("\n", " ")}]
-    if modality in ("image", "audio"):
-        return [{"modality": modality, "kind": "media", "payload": path, "preview": ""}]
-    # video -> frame (image) + audio (audio)
+def _duration(path):
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                              "-of", "default=nw=1:nk=1", path], capture_output=True, text=True)
+        return float(out.stdout.strip())
+    except Exception:
+        return 0.0
+
+def video_parts(path):
+    """Extract VIDEO_FRAMES frames spread across the clip + a clipped audio track."""
     os.makedirs(DERIV, exist_ok=True)
     stem = os.path.splitext(os.path.basename(path))[0]
-    frame = os.path.join(DERIV, f"{stem}.frame.jpg")
+    dur = _duration(path) or 1.0
+    frames = []
+    for i in range(VIDEO_FRAMES):
+        t = dur * (i + 0.5) / VIDEO_FRAMES
+        fp = os.path.join(DERIV, f"{stem}.f{i}.jpg")
+        try:
+            _ff(["-ss", f"{t:.2f}", "-i", path, "-frames:v", "1", fp])
+            if os.path.exists(fp):
+                frames.append(fp)
+        except Exception:
+            pass
     audio = os.path.join(DERIV, f"{stem}.audio.wav")
-    items = []
     try:
-        _ff(["-ss", "1", "-i", path, "-frames:v", "1", frame])
-        items.append({"modality": "image", "kind": "media", "payload": frame,
-                      "preview": "[video frame]", "from_video": path})
-    except Exception as e:
-        print(f"    (no frame from {os.path.basename(path)}: {e})")
-    try:
-        _ff(["-i", path, "-vn", "-ar", "16000", "-ac", "1", audio])
-        if os.path.getsize(audio) > 1000:
-            items.append({"modality": "audio", "kind": "media", "payload": audio,
-                          "preview": "[video audio]", "from_video": path})
-    except Exception as e:
-        print(f"    (no audio from {os.path.basename(path)}: {e})")
-    return items
+        _ff(["-t", str(VIDEO_AUDIO_SEC), "-i", path, "-vn", "-ar", "16000", "-ac", "1", audio])
+        if not (os.path.exists(audio) and os.path.getsize(audio) > 1000):
+            audio = None
+    except Exception:
+        audio = None
+    return frames, audio
 
 # ---- store ------------------------------------------------------------------
 def load_store():
@@ -108,24 +124,36 @@ def expand(paths):
     return sorted(set(out))
 
 # ---- commands ---------------------------------------------------------------
+def _embed_file(f, m):
+    """Return (vector, preview) for one file, or raise. Video is fused multi-frame + audio."""
+    if m == "text":
+        txt = open(f, errors="replace").read()
+        return embed_text(txt[:8000]), txt[:80].replace("\n", " ")
+    if m in ("image", "audio"):
+        return embed_media(f), ""
+    # video: several frames + audio fused into one vector
+    frames, audio = video_parts(f)
+    if not frames and not audio:
+        raise RuntimeError("ffmpeg extracted no frames or audio")
+    parts = frames + ([audio] if audio else [])
+    return embed_fused(parts, f), f"[video: {len(frames)} frames{' + audio' if audio else ''}]"
+
 def cmd_ingest(args):
     idx, meta = load_store()
-    known = {v.get("source") or v["path"] for v in meta["items"].values()}
+    known = {v["path"] for v in meta["items"].values()}
     files = [f for f in expand(args.paths) if modality_of(f) and f not in known]
     if not files: print("nothing new to ingest."); return
     nid, nvec = [], []
     for f in files:
-        for it in derive(f, modality_of(f)):
-            try:
-                v = embed_text(it["payload"]) if it["kind"] == "text" else embed_media(it["payload"])
-            except Exception as e:
-                print(f"  skip {os.path.basename(f)} ({it['modality']}): {e}"); continue
-            i = meta["next_id"]; meta["next_id"] += 1
-            meta["items"][str(i)] = {"path": f, "source": f, "modality": it["modality"],
-                                     "preview": it["preview"], "from_video": it.get("from_video")}
-            nid.append(i); nvec.append(v)
-            tag = f"{it['modality']}" + ("/vid" if it.get("from_video") else "")
-            print(f"  +{tag:9} id={i}  {os.path.basename(f)}")
+        m = modality_of(f)
+        try:
+            v, preview = _embed_file(f, m)
+        except Exception as e:
+            print(f"  skip {os.path.basename(f)} ({m}): {e}"); continue
+        i = meta["next_id"]; meta["next_id"] += 1
+        meta["items"][str(i)] = {"path": f, "modality": m, "preview": preview}
+        nid.append(i); nvec.append(v)
+        print(f"  +{m:6} id={i}  {os.path.basename(f)}")
     if nid:
         idx.add_with_ids(np.vstack(nvec).astype(np.float32), np.array(nid, dtype=np.uint64))
         save_store(idx, meta)
@@ -136,25 +164,60 @@ def _by_mod(meta):
     for sid, v in meta["items"].items(): by.setdefault(v["modality"], []).append(int(sid))
     return by
 
+# Diverse probe queries used to estimate each modality's score distribution, so a
+# modality with a single item (one video, one audio clip) can still be calibrated
+# against the cross-modal gap. (Result-set z-scoring fails for singletons.)
+PROBES = [
+    "a photograph of an animal", "a city skyline at night", "a person speaking",
+    "a piece of music playing", "a financial report", "a cooking recipe",
+    "a landscape with mountains", "a sports event", "a technical diagram",
+    "a historical landmark", "a car on a road", "a child playing",
+    "computer code on a screen", "a news broadcast", "a scientific experiment",
+    "a product advertisement",
+]
+
+def _calibration(idx, by):
+    """Per-modality (mean, std) of cosine to a fixed probe-query bank."""
+    pv = np.vstack([embed_text(p) for p in PROBES]).astype(np.float32)
+    stats = {}
+    for m, ids in by.items():
+        sc, _ = idx.search(pv, k=len(ids), allowlist=np.array(ids, dtype=np.uint64))
+        flat = np.asarray(sc, dtype=np.float64).reshape(-1)
+        stats[m] = [float(flat.mean()), float(flat.std() + 1e-9)]
+    return stats
+
+def _get_calibration(idx, meta, by):
+    cal = meta.get("calib")
+    if not cal or cal.get("n") != len(idx) or set(cal.get("stats", {})) != set(by):
+        print("  (calibrating modalities against probe queries ...)")
+        meta["calib"] = {"n": len(idx), "stats": _calibration(idx, by)}
+        json.dump(meta, open(META_F, "w"), indent=0)
+    return meta["calib"]["stats"]
+
 def cmd_query(args):
     idx, meta = load_store()
     if len(idx) == 0: sys.exit("index empty - ingest something first.")
+    by = _by_mod(meta)
+    stats = _get_calibration(idx, meta, by)
     qv = embed_text(args.text).reshape(1, -1).astype(np.float32)
     merged = []
-    for m, ids in _by_mod(meta).items():
+    for m, ids in by.items():
+        mean_m, std_m = stats[m]
         sc, rid = idx.search(qv, k=min(len(ids), max(args.k * 4, 10)),
                              allowlist=np.array(ids, dtype=np.uint64))
-        sc, rid = sc[0], rid[0]
-        z = (sc - sc.mean()) / (sc.std() + 1e-9) if len(sc) > 1 else sc * 0
-        for s, zi, r in zip(sc, z, rid):
-            merged.append((float(zi) + 3.0 * float(s), float(zi), float(s), int(r), m))
+        for s, r in zip(sc[0], rid[0]):
+            z = (float(s) - mean_m) / std_m          # how unusual is this cos for modality m
+            # blend the probe-calibrated z (closes the modality gap, works for
+            # singletons) with raw cos (keeps absolute relevance, so a modality's
+            # merely-relative-best cannot outrank a genuinely strong match)
+            merged.append((z + 3.0 * float(s), z, float(s), int(r), m))
     merged.sort(reverse=True)
     print(f"query: {args.text!r}\n")
-    for blend, zi, s, r, m in merged[:args.k]:
+    for blend, z, s, r, m in merged[:args.k]:
         it = meta["items"][str(r)]
         tail = it["preview"] or os.path.basename(it["path"])
-        src = f"  (from {os.path.basename(it['from_video'])})" if it.get("from_video") else ""
-        print(f"  score={blend:+.2f} (z={zi:+.2f} cos={s:+.3f})  [{m:5}] {tail}{src}")
+        name = os.path.basename(it["path"]) if it["preview"] else ""
+        print(f"  score={blend:+.2f} (z={z:+.2f} cos={s:+.3f})  [{m:5}] {tail}  {name}".rstrip())
 
 def cmd_stats(args):
     idx, meta = load_store(); by = _by_mod(meta)

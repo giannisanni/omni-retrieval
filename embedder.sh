@@ -31,7 +31,7 @@ case "${1:-}" in
     #   --no-mmproj-offload runs the vision/audio projector on CPU (the CUDA CLIP
     #                       graph uses unsupported ops -> degenerate vectors).
     LLAMA_MEDIA_MARKER='<__media__>' nohup "$BIN" -m "$M" --mmproj "$P" --no-mmproj-offload \
-      --embedding --pooling last -ngl 99 --host 127.0.0.1 --port "$PORT" -c 4096 \
+      --embedding --pooling last -ngl 99 --host 127.0.0.1 --port "$PORT" -c 8192 \
       > "$LOG" 2>&1 &
     for _ in $(seq 1 120); do
       grep -qi "server is listening" "$LOG" 2>/dev/null && { echo "embedder ready on :$PORT"; exit 0; }

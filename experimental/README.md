@@ -22,7 +22,7 @@ Two findings from testing on an RTX 4060 Ti (small probes, descriptive):
 
    (Absolute cosines are not comparable across representations due to per-modality anisotropy; the point is that audio clearly separated the speech and the fused video did not.)
 
-**Takeaway:** the main path's two-row decomposition (index the frame and the audio as separate items, calibrated by per-modality z-scoring) preserves the speech signal better than fusing into one native-video vector. Native fused video should win for **motion / temporal / visually-driven** content, not for speech payload. The open problem is matching LCO's true pooling recipe; contributions welcome.
+**Takeaway:** fusing many frames + audio into one vector dilutes the speech (the frame tokens dominate). Native fused video should win for **motion / temporal / visually-driven** content, not for speech payload. The main GGUF path also fuses video now, but with fewer frames (default 6) and probe-based calibration, so a lone video stays findable; see the top-level README. The open problem here is matching LCO's true pooling recipe so this path stops trailing the GGUF path on retrieval; contributions welcome.
 
 ## Install
 

@@ -1,6 +1,6 @@
 # omni-retrieval
 
-**Fully-local, air-gapped cross-modal retrieval across text, images, audio, and video.** One model embeds everything into a single shared vector space (video is handled via its frames and audio track), and a compact 4-bit index runs fast nearest-neighbor search on CPU. Type a plain-language description and get back the matching document, photo, audio clip, or video. It matches on content rather than metadata, so your files need no captions or tags, and it all runs on your own hardware.
+**Fully-local, air-gapped cross-modal retrieval across text, images, audio, and video.** One model embeds everything into a single shared vector space (video by fusing sampled frames and its audio), and a compact 4-bit index runs fast nearest-neighbor search on CPU. Type a plain-language description and get back the matching document, photo, audio clip, or video. It matches on content rather than metadata, so your files need no captions or tags, and it all runs on your own hardware.
 
 It pairs:
 
@@ -31,7 +31,7 @@ A text query retrieving an *image* by its visual content, with no metadata on th
 | backend | GGUF + llama.cpp | HF transformers |
 | this is | the `lcovec` CLI (this README) | [`experimental/`](experimental/) |
 | footprint | ~9 GB VRAM, fast, CPU index | full bf16 model, heavier |
-| video | one frame + audio track | **native multi-frame + audio** |
+| video | multi-frame + audio fused (one vector) | native temporal frames + audio |
 | retrieval quality | clean (4/4 on the cross-modal probe) | lower in our tests (3/4) |
 | use it for | actually using/searching, and demos | research, native-video work, development |
 
@@ -83,13 +83,13 @@ The pipeline has four stages.
 
 - **text** (`.txt`, `.md`, ...): the file's contents are read and embedded directly.
 - **images** and **audio** (`.jpg`, `.wav`, ...): the raw file is base64-encoded and embedded as media.
-- **video** (`.mp4`, ...): the LCO model supports video, but the way it is served here (llama.cpp's multimodal stack) only decodes image and audio inputs, not video containers, so a raw `.mp4` is rejected. `lcovec` therefore does the step a native video pipeline would do anyway: it uses `ffmpeg` to split each clip into a representative **frame** (indexed as an image) and its **audio track** (indexed as audio), both pointing back to the source video. Note this is a simplification: a single frame captures roughly what is on screen but not motion or anything that only appears mid-clip. Sampling multiple frames would approximate true video more closely. The audio row is also subject to the speech caveat below. (See [Native video](#native-video) for the limitation in detail.)
+- **video** (`.mp4`, ...): llama.cpp's multimodal stack does not decode video containers, so a raw `.mp4` is rejected. `lcovec` does the decode itself: it uses `ffmpeg` to sample several frames spread across the clip (default 6) plus the audio track, and sends them as **one fused multimodal request** so the model returns a single multi-frame + audio **video** vector. Tune with `LCOVEC_VIDEO_FRAMES` / `LCOVEC_VIDEO_AUDIO_SEC`. This captures the whole clip, not just one frame; the remaining gap vs a true native pipeline is temporal frame-merging (see [Native video](#native-video)). The audio component is subject to the speech caveat below.
 
 Re-running `ingest` skips files already in the index.
 
 **3. Indexing.** Each vector is stored in a turbovec `IdMapIndex` under a stable uint64 id, while the file's path and modality are kept in a small JSON sidecar. turbovec quantizes every vector to 4 bits per dimension (TurboQuant), which is what lets ~10M items fit in roughly 5 GB of RAM and keeps nearest-neighbor search fast on CPU, with no GPU needed once the corpus is embedded. Ids survive deletion, so a corpus that constantly gains and loses files stays consistent without rebuilds.
 
-**4. Querying, with cross-modal calibration.** Your text query is embedded by the same model, then searched against the index. A naive nearest-neighbor lookup is biased: text-to-text similarities run systematically higher than text-to-image or text-to-audio, so correct images and audio sink beneath unrelated text. `lcovec` corrects this by searching each modality separately (via turbovec's `allowlist`), standardizing scores within each modality, and ranking by a blend of that standardized score and the raw cosine, so the right photo or clip surfaces next to the right document in a single list. The mechanism is detailed in [The modality gap and how it is fixed](#the-modality-gap-and-how-it-is-fixed).
+**4. Querying, with cross-modal calibration.** Your text query is embedded by the same model, then searched against the index. A naive nearest-neighbor lookup is biased: text-to-text similarities run systematically higher than text-to-image, text-to-audio, or text-to-video, so correct non-text items sink beneath unrelated text. `lcovec` corrects this by estimating each modality's score distribution against a fixed bank of probe queries, standardizing each result against its modality's distribution, and blending that with the raw cosine. This works even for a modality with a single item (one video, one audio clip), so a lone video is still findable. The mechanism is detailed in [The modality gap and how it is fixed](#the-modality-gap-and-how-it-is-fixed).
 
 ---
 
@@ -185,19 +185,19 @@ Recognized extensions: text (`.txt .md .markdown .rst`), image (`.jpg .jpeg .png
 
 ## The modality gap and how it is fixed
 
-Embeddings cluster by modality: text-to-text cosines run systematically higher than text-to-image or text-to-audio, even when the cross-modal match is correct. In a naive single ranked list this buries correct images and audio beneath unrelated text.
+Embeddings cluster by modality: text-to-text cosines run systematically higher than text-to-image, text-to-audio, or text-to-video, even when the cross-modal match is correct. In a naive single ranked list this buries correct non-text items beneath unrelated text.
 
-`lcovec` corrects the calibration at query time:
+`lcovec` calibrates each modality against a fixed bank of diverse probe queries:
 
-1. Search **each modality separately** using turbovec's `allowlist` (one `IdMapIndex`, one allowlisted query per modality), so each modality gets representative score statistics.
-2. **Standardize** within each modality: `z = (cos - mean) / std`.
-3. **Rank by a blend** that keeps absolute relevance so an irrelevant modality's relative-best cannot float to the top:
+1. **Estimate each modality's score distribution.** For a fixed set of ~16 probe queries, search each modality (via turbovec's `allowlist`) and collect the cosines, giving a per-modality `(mean, std)`. This is cached and recomputed only when the index changes.
+2. **Standardize** each result against its modality: `z = (cos - mean) / std`. Because the stats come from the probe bank, not the result set, this works even for a modality with a **single item** (one video, one audio clip) - the case where result-set z-scoring fails and a lone video is unrankable.
+3. **Blend** with raw cosine so a modality's merely-relative-best cannot outrank a genuinely strong match:
 
    ```text
    score = z + 3 * cos
    ```
 
-On a controlled probe set this moved the correct image from rank ~7 to rank ~2 in a mixed list, while keeping the matching text at rank 1.
+In testing this moves a correct image from rank ~7 to the top of a mixed list, and makes a single video findable by its content (rank 1 for a matching query) while correctly demoting it for unrelated queries.
 
 ---
 
@@ -216,7 +216,7 @@ Small controlled probes on the reference hardware. These are descriptive, not a 
 
 The model is language-centric: it aligns audio to words well when the audio carries **speech**, and poorly for pure sound effects or music. Retrieve non-speech audio by **audio-to-audio** similarity instead of text. Absolute audio cosines stay low (~0.07-0.10 even for matches), which is exactly why the per-modality standardization above matters.
 
-**Video:** raw `.mp4` is rejected by the serving stack (not the model); `lcovec` decomposes it into a single frame (image) + audio track (subject to the speech rule above). See [Native video](#native-video).
+**Video:** raw `.mp4` is rejected by the serving stack (not the model); `lcovec` decodes several frames + audio with `ffmpeg` and fuses them into one video vector (see [Native video](#native-video)). With probe calibration, a single video is findable by its content (rank 1 for a matching query, demoted for unrelated ones).
 
 | capability | status |
 |---|---|
@@ -224,7 +224,7 @@ The model is language-centric: it aligns audio to words well when the audio carr
 | text -> image | strong |
 | text -> audio (speech) | works (rank-correct, low absolute scores) |
 | text -> audio (non-speech) | unreliable; use audio-to-audio |
-| text -> video | via 1 extracted frame + audio (no motion/temporal info) |
+| text -> video | multi-frame + audio fused; findable via probe calibration |
 | add / search / delete with stable ids | works (O(1) delete) |
 
 ---
@@ -233,11 +233,11 @@ The model is language-centric: it aligns audio to words well when the audio carr
 
 The LCO model architecture (Qwen2.5-Omni) genuinely supports video. The limitation is the **serving layer**, not the model. In the reference pipeline (HF transformers / vLLM), a processor decodes the container, samples frames over time, and extracts audio before the model ever sees it, so "native video" is really frames + audio assembled by the processor.
 
-This project serves the GGUF through **llama.cpp's multimodal stack (mtmd)**, which accepts already-decoded image and audio bitmaps but has no video-container decode or frame-sampling step at the `/embedding` endpoint. A raw `.mp4` therefore returns `HTTP 500 "Failed to load image or audio file"`. `lcovec` does the missing step itself with `ffmpeg`, simplified to one frame plus the full audio track, which loses motion and temporal content.
+This project serves the GGUF through **llama.cpp's multimodal stack (mtmd)**, which accepts already-decoded image and audio bitmaps but has no video-container decode at the `/embedding` endpoint. A raw `.mp4` returns `HTTP 500 "Failed to load image or audio file"`. `lcovec` does the decode itself with `ffmpeg`: it samples several frames across the clip plus the audio and sends them as one fused multimodal request, so the GGUF path produces a real **multi-frame + audio** video vector. This is the practical fix and keeps the lightweight footprint.
 
-To get true multi-frame video, serve LCO through transformers or vLLM with the Qwen2.5-Omni processor, or sample several frames per clip and index them all. The trade-off is giving up llama.cpp's lightweight GGUF/CPU-friendly footprint. A working transformers implementation lives in [`experimental/`](experimental/) (Path B).
+What it is *not* yet: true temporal video. mtmd merges at most two consecutive frames (`n_merge_frames <= 2`), so the frames are largely treated as a set of images rather than a time-ordered sequence with full temporal position encoding. For that, serve LCO through transformers or vLLM with the Qwen2.5-Omni processor; a working transformers implementation lives in [`experimental/`](experimental/) (Path B).
 
-One empirical caveat from testing that path: fusing a speech clip into a single native-video vector retrieved its *speech* worse than indexing the frame and audio separately, because the visual frame tokens dominate the pooled vector and dilute the audio. Native video helps for motion/visual content, not speech payload. Details in [experimental/README.md](experimental/README.md).
+Empirical caveat: on a speech-heavy clip, the fused video vector is dominated by the visual frame tokens and under-weights the audio, so its *speech* is retrieved less strongly than a dedicated audio embedding would be. Probe calibration still makes the video findable, but native fused video helps most for motion/visual content, not speech payload. Details in [experimental/README.md](experimental/README.md).
 
 ---
 
@@ -245,8 +245,8 @@ One empirical caveat from testing that path: fusing a speech clip into a single 
 
 - **VRAM:** ~9 GB resident (Q8 weights 3.4 GB + F16 mmproj 2.5 GB + KV cache + CUDA context). Fits a 16 GB card with room to spare.
 - **Index:** ~512 bytes per vector at 4-bit (~5 GB for 10M items), held in CPU RAM. 2-bit halves it.
-- **Throughput:** text embeds are fast; media embeds run the projector on CPU (~30 s per ~15 s audio clip on an 8-core box). Fine for batch ingestion, not for high-QPS media ingest.
-- **Context:** 4096 tokens. Audio is ~100 tokens/second, so clips beyond ~40 s should be chunked.
+- **Throughput:** text embeds are fast; media embeds run the projector on CPU (~30 s per ~15 s audio clip on an 8-core box). Fine for batch ingestion, not for high-QPS media ingest. The first query after the index changes also embeds ~16 probe queries to recalibrate (cached afterwards).
+- **Context:** 8192 tokens (`embedder.sh`). Audio is ~100 tokens/second; fused video uses `LCOVEC_VIDEO_FRAMES` frames (~256 tokens each) plus `LCOVEC_VIDEO_AUDIO_SEC` of audio, kept within this budget.
 
 ---
 
@@ -268,6 +268,8 @@ In other words: the index is decoupled from the embedder and will store whatever
 |---|---|---|
 | `LCO_SERVER` | `http://127.0.0.1:8090` | `lcovec.py`, `poc.py` |
 | `LCOVEC_STORE` | `~/.lcovec/store` | `lcovec.py` |
+| `LCOVEC_VIDEO_FRAMES` | `6` | `lcovec.py` (frames sampled per video) |
+| `LCOVEC_VIDEO_AUDIO_SEC` | `45` | `lcovec.py` (seconds of audio fused per video) |
 | `LLAMA_SERVER_BIN` | `~/ht-llama.cpp/build/bin/llama-server` | `embedder.sh` |
 | `LCO_MODEL` | `~/models/lco-omni/LCO-Embedding-Omni-3B-2605-Q8_0.gguf` | `embedder.sh` |
 | `LCO_MMPROJ` | `~/models/lco-omni/mmproj-LCO-Embedding-Omni-3B-2605-F16.gguf` | `embedder.sh` |
