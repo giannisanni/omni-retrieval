@@ -63,16 +63,24 @@ A text query retrieving an *image* by its visual content, with no metadata on th
 ```mermaid
 flowchart LR
     subgraph SRC["mixed-media corpus"]
-        T["text"]; I["images"]; A["audio"]; V["video"]
+        T["text"]
+        I["images"]
+        A["audio"]
+        V["video"]
     end
     subgraph GPU["embedder (GPU, ~9 GB)"]
-        E["LCO-Embedding-Omni-3B<br/>llama.cpp fork<br/>--embedding --pooling last"]
+        E["LCO-Embedding-Omni-3B / llama.cpp fork / --embedding --pooling last"]
     end
     subgraph CPU["index (CPU + RAM)"]
-        X["turbovec IdMapIndex<br/>dim=2048, 4-bit<br/>stable uint64 ids"]
+        X["turbovec IdMapIndex / dim 2048, 4-bit / stable uint64 ids"]
     end
-    SRC -->|ingest| E -->|2048-d vectors| X
-    Q["text query"] --> E -.->|query vector| X -.->|top-k ids + scores| R["ranked results"]
+    Q["text query"]
+    R["ranked results"]
+    SRC -->|ingest| E
+    E -->|2048-d vectors| X
+    Q --> E
+    E -.->|query vector| X
+    X -.->|top-k ids + scores| R
 ```
 
 The pipeline has four stages.
