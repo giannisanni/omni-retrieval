@@ -1,0 +1,4 @@
+turbovec
+numpy
+requests
+# System dependency (not pip): ffmpeg, required only for video/audio ingestion.

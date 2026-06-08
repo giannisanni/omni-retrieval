@@ -1,0 +1,15 @@
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# local data / artifacts (never commit)
+.lcovec/
+store/
+derived/
+images/
+media/
+*.gguf
+*.tvim
+*.log
