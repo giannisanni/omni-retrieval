@@ -60,7 +60,21 @@ flowchart LR
     Q["text query"] --> E -.->|query vector| X -.->|top-k ids + scores| R["ranked results"]
 ```
 
-Video is not ingested directly (the embedder rejects container files). On ingest, `lcovec` decomposes each video with `ffmpeg` into a representative **frame** (indexed as an image) and its **audio track** (indexed as audio).
+The pipeline has four stages.
+
+**1. Embedding into one shared space.** A single model, LCO-Embedding-Omni-3B, turns any input (a sentence, a photo, an audio clip) into one 2048-dimensional vector. It was contrastively trained to place semantically related inputs near each other *regardless of modality*, so the sentence "a sleeping cat" and a photograph of a sleeping cat land close together in the same space. That shared geometry is what makes typing words and getting back a matching image possible. The model is served by a `llama.cpp` fork with `--pooling last` (the embedding is the final token's hidden state) and the vectors come out L2-normalized, so similarity is a plain dot product (cosine).
+
+**2. Ingestion, routed by file type.** `ingest` walks the paths you give it and handles each file according to its extension:
+
+- **text** (`.txt`, `.md`, ...): the file's contents are read and embedded directly.
+- **images** and **audio** (`.jpg`, `.wav`, ...): the raw file is base64-encoded and embedded as media.
+- **video** (`.mp4`, ...): the embedder rejects container files, so `lcovec` uses `ffmpeg` to split each clip into a representative **frame** (embedded and indexed as an image) and its **audio track** (embedded and indexed as audio). Both rows point back to the source video, and the audio row is subject to the speech caveat below.
+
+Re-running `ingest` skips files already in the index.
+
+**3. Indexing.** Each vector is stored in a turbovec `IdMapIndex` under a stable uint64 id, while the file's path and modality are kept in a small JSON sidecar. turbovec quantizes every vector to 4 bits per dimension (TurboQuant), which is what lets ~10M items fit in roughly 5 GB of RAM and keeps nearest-neighbor search fast on CPU, with no GPU needed once the corpus is embedded. Ids survive deletion, so a corpus that constantly gains and loses files stays consistent without rebuilds.
+
+**4. Querying, with cross-modal calibration.** Your text query is embedded by the same model, then searched against the index. A naive nearest-neighbor lookup is biased: text-to-text similarities run systematically higher than text-to-image or text-to-audio, so correct images and audio sink beneath unrelated text. `lcovec` corrects this by searching each modality separately (via turbovec's `allowlist`), standardizing scores within each modality, and ranking by a blend of that standardized score and the raw cosine, so the right photo or clip surfaces next to the right document in a single list. The mechanism is detailed in [The modality gap and how it is fixed](#the-modality-gap-and-how-it-is-fixed).
 
 ---
 
