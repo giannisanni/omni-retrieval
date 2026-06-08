@@ -1,0 +1,17 @@
+# Transformers (full-fidelity / native-video) path.
+#
+# Install torch FIRST, matched to your CUDA, e.g.:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# Then:
+#   pip install -r requirements-transformers.txt
+#
+# transformers is pinned <5 because 5.x requires torch >= 2.7
+# (it uses torch.float8_e8m0fnu). Drop the upper pin if you run torch 2.7+.
+transformers>=4.52,<5
+qwen-omni-utils
+accelerate
+soundfile
+librosa
+av
+numpy
+# torch, torchvision: install separately with the CUDA index URL (see above)

@@ -24,6 +24,21 @@ A text query retrieving an *image* by its visual content, with no metadata on th
 
 ---
 
+## Two ways to run it
+
+| | Path A: lite (recommended) | Path B: full (experimental) |
+|---|---|---|
+| backend | GGUF + llama.cpp | HF transformers |
+| this is | the `lcovec` CLI (this README) | [`experimental/`](experimental/) |
+| footprint | ~9 GB VRAM, fast, CPU index | full bf16 model, heavier |
+| video | one frame + audio track | **native multi-frame + audio** |
+| retrieval quality | clean (4/4 on the cross-modal probe) | lower in our tests (3/4) |
+| use it for | actually using/searching, and demos | research, native-video work, development |
+
+**Most people want Path A** (the rest of this README). Path B exists for native video and capability research; it is honest about currently underperforming Path A for retrieval. See [experimental/README.md](experimental/README.md).
+
+---
+
 ## Contents
 
 - [How it works](#how-it-works)
@@ -220,7 +235,9 @@ The LCO model architecture (Qwen2.5-Omni) genuinely supports video. The limitati
 
 This project serves the GGUF through **llama.cpp's multimodal stack (mtmd)**, which accepts already-decoded image and audio bitmaps but has no video-container decode or frame-sampling step at the `/embedding` endpoint. A raw `.mp4` therefore returns `HTTP 500 "Failed to load image or audio file"`. `lcovec` does the missing step itself with `ffmpeg`, simplified to one frame plus the full audio track, which loses motion and temporal content.
 
-To get true multi-frame video, serve LCO through transformers or vLLM with the Qwen2.5-Omni processor, or sample several frames per clip and index them all. The trade-off is giving up llama.cpp's lightweight GGUF/CPU-friendly footprint.
+To get true multi-frame video, serve LCO through transformers or vLLM with the Qwen2.5-Omni processor, or sample several frames per clip and index them all. The trade-off is giving up llama.cpp's lightweight GGUF/CPU-friendly footprint. A working transformers implementation lives in [`experimental/`](experimental/) (Path B).
+
+One empirical caveat from testing that path: fusing a speech clip into a single native-video vector retrieved its *speech* worse than indexing the frame and audio separately, because the visual frame tokens dominate the pooled vector and dilute the audio. Native video helps for motion/visual content, not speech payload. Details in [experimental/README.md](experimental/README.md).
 
 ---
 
@@ -270,6 +287,8 @@ omni-retrieval/
     build_llama_fork.sh    # clone + CUDA-build the ht-llama.cpp fork
     download_model.sh      # fetch the LCO-Omni GGUF + mmproj
     fetch_sample_images.sh # 4 CC images for poc.py
+  experimental/          # Path B: transformers / native-video (research, see its README)
+    embed_tf.py  compare.py  diag.py  download_hf_model.sh
 ```
 
 Index and metadata persist under `~/.lcovec/store` (`index.tvim`, `meta.json`, `derived/`).

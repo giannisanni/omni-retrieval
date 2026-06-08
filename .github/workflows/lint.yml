@@ -24,4 +24,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
-        run: shellcheck embedder.sh scripts/*.sh
+        run: shellcheck embedder.sh scripts/*.sh experimental/*.sh
