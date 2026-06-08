@@ -68,7 +68,7 @@ The pipeline has four stages.
 
 - **text** (`.txt`, `.md`, ...): the file's contents are read and embedded directly.
 - **images** and **audio** (`.jpg`, `.wav`, ...): the raw file is base64-encoded and embedded as media.
-- **video** (`.mp4`, ...): the embedder rejects container files, so `lcovec` uses `ffmpeg` to split each clip into a representative **frame** (embedded and indexed as an image) and its **audio track** (embedded and indexed as audio). Both rows point back to the source video, and the audio row is subject to the speech caveat below.
+- **video** (`.mp4`, ...): the LCO model supports video, but the way it is served here (llama.cpp's multimodal stack) only decodes image and audio inputs, not video containers, so a raw `.mp4` is rejected. `lcovec` therefore does the step a native video pipeline would do anyway: it uses `ffmpeg` to split each clip into a representative **frame** (indexed as an image) and its **audio track** (indexed as audio), both pointing back to the source video. Note this is a simplification: a single frame captures roughly what is on screen but not motion or anything that only appears mid-clip. Sampling multiple frames would approximate true video more closely. The audio row is also subject to the speech caveat below. (See [Native video](#native-video) for the limitation in detail.)
 
 Re-running `ingest` skips files already in the index.
 
@@ -201,7 +201,7 @@ Small controlled probes on the reference hardware. These are descriptive, not a 
 
 The model is language-centric: it aligns audio to words well when the audio carries **speech**, and poorly for pure sound effects or music. Retrieve non-speech audio by **audio-to-audio** similarity instead of text. Absolute audio cosines stay low (~0.07-0.10 even for matches), which is exactly why the per-modality standardization above matters.
 
-**Video:** raw `.mp4` is rejected by the embedder; `lcovec` decomposes it into a frame (image) + audio track (subject to the speech rule above).
+**Video:** raw `.mp4` is rejected by the serving stack (not the model); `lcovec` decomposes it into a single frame (image) + audio track (subject to the speech rule above). See [Native video](#native-video).
 
 | capability | status |
 |---|---|
@@ -209,8 +209,18 @@ The model is language-centric: it aligns audio to words well when the audio carr
 | text -> image | strong |
 | text -> audio (speech) | works (rank-correct, low absolute scores) |
 | text -> audio (non-speech) | unreliable; use audio-to-audio |
-| text -> video | via extracted frame + audio |
+| text -> video | via 1 extracted frame + audio (no motion/temporal info) |
 | add / search / delete with stable ids | works (O(1) delete) |
+
+---
+
+## Native video
+
+The LCO model architecture (Qwen2.5-Omni) genuinely supports video. The limitation is the **serving layer**, not the model. In the reference pipeline (HF transformers / vLLM), a processor decodes the container, samples frames over time, and extracts audio before the model ever sees it, so "native video" is really frames + audio assembled by the processor.
+
+This project serves the GGUF through **llama.cpp's multimodal stack (mtmd)**, which accepts already-decoded image and audio bitmaps but has no video-container decode or frame-sampling step at the `/embedding` endpoint. A raw `.mp4` therefore returns `HTTP 500 "Failed to load image or audio file"`. `lcovec` does the missing step itself with `ffmpeg`, simplified to one frame plus the full audio track, which loses motion and temporal content.
+
+To get true multi-frame video, serve LCO through transformers or vLLM with the Qwen2.5-Omni processor, or sample several frames per clip and index them all. The trade-off is giving up llama.cpp's lightweight GGUF/CPU-friendly footprint.
 
 ---
 
