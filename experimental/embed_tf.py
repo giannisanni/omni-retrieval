@@ -6,10 +6,11 @@ Unlike the GGUF/llama.cpp path, this can do NATIVE multi-frame video (frames +
 audio fused into one vector). It is the reference/research path: heavier, and in
 our testing its retrieval quality is below the GGUF path (see experimental/README.md).
 
-Embedding = mean-pool over the Thinker's post-final-norm hidden states,
-L2-normalized. This was the extraction with the cleanest semantic ordering we
-found (see diag.py); it is an approximation of LCO's exact recipe, which the
-llama.cpp path encodes and the model repo does not document.
+Embedding = last token of the final decoder layer's PRE-final-norm hidden state
+(`hidden_states[-1]`), L2-normalized. This was reverse-engineered by matching the
+GGUF/llama.cpp `--pooling last` output: it reproduces the GGUF vectors at mean
+cosine 0.9985 (vs 0.96 for post-norm last, 0.52 for mean pooling). See
+match_recipe.py.
 
 Env:
   LCO_HF_MODEL   path to the non-GGUF model dir (default ~/models/lco-omni-hf)
@@ -35,29 +36,35 @@ def _np(v):
     v = v.float().cpu().numpy()
     return v / (np.linalg.norm(v) + 1e-9)
 
-def _meanpool(h, mask):           # h:(1,seq,2048), mask:(1,seq)
-    m = mask.unsqueeze(-1).to(h.dtype)
-    return ((h * m).sum(1) / m.sum(1).clamp(min=1))[0]
+def _pool_last(out):
+    # LCO recipe: last token of the final layer's PRE-norm hidden state.
+    return _np(out.hidden_states[-1][0, -1])
 
 @torch.no_grad()
 def embed_text(t):
     model, proc = load()
     enc = proc.tokenizer(t, return_tensors="pt").to(model.device)
-    out = model.model(input_ids=enc.input_ids, attention_mask=enc.attention_mask, return_dict=True)
-    return _np(_meanpool(out.last_hidden_state, enc.attention_mask))   # last_hidden_state is post-norm
+    out = model(input_ids=enc.input_ids, attention_mask=enc.attention_mask,
+                output_hidden_states=True, return_dict=True)
+    return _pool_last(out)
 
 @torch.no_grad()
 def _embed_media(content, use_audio_in_video=False):
     model, proc = load()
-    conv = [{"role": "system", "content": [{"type": "text", "text": ""}]},
-            {"role": "user", "content": content}]
-    text = proc.apply_chat_template(conv, add_generation_prompt=False, tokenize=False)
+    conv = [{"role": "user", "content": content}]
     audios, images, videos = process_mm_info(conv, use_audio_in_video=use_audio_in_video)
+    # bare media markers (no chat scaffold) so the LAST token is media content,
+    # matching the GGUF path's prompt_string="<__media__>" construction.
+    parts = []
+    for c in content:
+        if c["type"] == "image": parts.append(f"<|vision_start|>{proc.image_token}<|vision_end|>")
+        elif c["type"] == "video": parts.append(f"<|vision_start|>{proc.video_token}<|vision_end|>")
+        elif c["type"] == "audio": parts.append(f"<|audio_bos|>{proc.audio_token}<|audio_eos|>")
+    text = "".join(parts)
     inputs = proc(text=text, audio=audios, images=images, videos=videos,
                   return_tensors="pt", padding=True, use_audio_in_video=use_audio_in_video).to(model.device)
     out = model(**inputs, output_hidden_states=True, return_dict=True, use_audio_in_video=use_audio_in_video)
-    h = model.model.norm(out.hidden_states[-1])    # apply final RMSNorm -> post-norm
-    return _np(_meanpool(h, inputs.attention_mask))
+    return _pool_last(out)
 
 def embed_image(path):
     return _embed_media([{"type": "image", "image": path}])

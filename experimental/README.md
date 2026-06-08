@@ -10,11 +10,13 @@ The model (Qwen2.5-Omni) supports video; llama.cpp's multimodal stack does not d
 
 ### What we measured
 
-Two findings from testing on an RTX 4060 Ti (small probes, descriptive):
+Findings from testing on an RTX 4060 Ti (small probes, descriptive):
 
-1. **Retrieval quality is below the GGUF path.** Reproducing LCO's exact embedding in raw transformers is non-trivial: the GGUF/llama.cpp path effectively encodes LCO's pooling/normalization recipe, which the model repo does not document. Our best extraction (mean-pool over post-final-norm hidden states; see `diag.py`) scored **3/4** on the cross-modal text->image probe vs the GGUF path's **4/4**.
+1. **LCO's pooling recipe, reverse-engineered by matching the GGUF output (`match_recipe.py`).** The embedding is the **last token of the final decoder layer's pre-final-norm hidden state** (`hidden_states[-1]`), L2-normalized. On text it reproduces the GGUF vectors at **mean cosine 0.9985** (vs 0.96 for post-norm last-token, 0.52 for mean-pooling - the model repo documents none of this). `embed_tf.py` now uses this recipe.
 
-2. **Fusing video into one vector did not help retrieval for a speech clip.** On a talking-head clip, the fused native-video vector is dominated by the visual frame tokens (~3,800) and under-weights the audio tokens (~1,500), so it retrieved the clip's *speech* worse than a dedicated audio embedding:
+2. **Text matches GGUF exactly; images are limited by preprocessing, not pooling.** With the matched recipe, transformers text embeddings equal GGUF (0.9985), but image embeddings reach only ~0.81 cosine to GGUF and score **3/4** on the cross-modal probe (vs GGUF's 4/4). The gap is **image preprocessing** - llama.cpp's CLIP resize/normalization differs from the HF processor - which changes the image features before pooling. Matching that pixel pipeline is the remaining open problem.
+
+3. **Fusing video into one vector did not help retrieval for a speech clip.** On a talking-head clip, the fused native-video vector is dominated by the visual frame tokens (~3,800) and under-weights the audio tokens (~1,500), so it retrieved the clip's *speech* worse than a dedicated audio embedding:
 
    | query | native_video | frame_only | audio_only |
    |---|---|---|---|
@@ -22,7 +24,7 @@ Two findings from testing on an RTX 4060 Ti (small probes, descriptive):
 
    (Absolute cosines are not comparable across representations due to per-modality anisotropy; the point is that audio clearly separated the speech and the fused video did not.)
 
-**Takeaway:** fusing many frames + audio into one vector dilutes the speech (the frame tokens dominate). Native fused video should win for **motion / temporal / visually-driven** content, not for speech payload. The main GGUF path also fuses video now, but with fewer frames (default 6) and probe-based calibration, so a lone video stays findable; see the top-level README. The open problem here is matching LCO's true pooling recipe so this path stops trailing the GGUF path on retrieval; contributions welcome.
+**Takeaway:** the pooling recipe is solved (text-exact); native video helps for **motion / visually-driven** content, not speech payload. The main GGUF path fuses video with fewer frames + per-item calibration so a lone video stays findable (see the top-level README). Remaining open problem for this path: replicate llama.cpp's image preprocessing to close the image gap.
 
 ## Install
 
@@ -56,10 +58,13 @@ python compare.py --video clip.mp4 \
     --query "what is shown on screen"
 ```
 
-Inspect the pooling choice:
+Verify the pooling recipe against the GGUF path (two steps, see the file's docstring):
 
 ```bash
-python diag.py
+# with ./embedder.sh start running, in the turbovec venv:
+python match_recipe.py capture
+# then stop the embedder, free VRAM, in the transformers venv:
+python match_recipe.py match     # expect "pre last" ~0.9985
 ```
 
 ## Files
@@ -68,6 +73,6 @@ python diag.py
 |---|---|
 | `embed_tf.py` | transformers embedder: text / image / audio / native video |
 | `compare.py` | native video vs single-frame vs audio-only, for a given clip |
-| `diag.py` | extraction-method diagnostic (why mean-pool) |
+| `match_recipe.py` | reverse-engineer LCO's pooling by matching the GGUF output |
 | `download_hf_model.sh` | fetch the non-GGUF weights |
 | `requirements-transformers.txt` | deps (install torch separately) |

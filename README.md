@@ -32,7 +32,7 @@ A text query retrieving an *image* by its visual content, with no metadata on th
 | this is | the `lcovec` CLI (this README) | [`experimental/`](experimental/) |
 | footprint | ~9 GB VRAM, fast, CPU index | full bf16 model, heavier |
 | video | multi-frame + audio fused (one vector) | native temporal frames + audio |
-| retrieval quality | clean (4/4 on the cross-modal probe) | lower in our tests (3/4) |
+| retrieval quality | clean (4/4 on the cross-modal probe) | text-exact (0.9985 to GGUF), images 3/4 (preprocessing gap) |
 | use it for | actually using/searching, and demos | research, native-video work, development |
 
 **Most people want Path A** (the rest of this README). Path B exists for native video and capability research; it is honest about currently underperforming Path A for retrieval. See [experimental/README.md](experimental/README.md).
@@ -298,7 +298,7 @@ omni-retrieval/
     download_model.sh      # fetch the LCO-Omni GGUF + mmproj
     fetch_sample_images.sh # 4 CC images for poc.py
   experimental/          # Path B: transformers / native-video (research, see its README)
-    embed_tf.py  compare.py  diag.py  download_hf_model.sh
+    embed_tf.py  compare.py  match_recipe.py  download_hf_model.sh
 ```
 
 Index and metadata persist under `~/.lcovec/store` (`index.tvim`, `meta.json`, `derived/`).
