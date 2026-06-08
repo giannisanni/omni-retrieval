@@ -1,4 +1,5 @@
 turbovec
 numpy
 requests
+pymupdf   # PDF ingestion (text per page + scanned-page rendering)
 # System dependency (not pip): ffmpeg, required only for video/audio ingestion.

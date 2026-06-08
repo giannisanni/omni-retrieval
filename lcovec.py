@@ -32,10 +32,12 @@ TEXT_EXT  = {".txt", ".md", ".markdown", ".text", ".rst"}
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
 AUDIO_EXT = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
+PDF_EXT   = {".pdf"}
 def modality_of(path):
     e = os.path.splitext(path)[1].lower()
     return ("text" if e in TEXT_EXT else "image" if e in IMAGE_EXT else
-            "audio" if e in AUDIO_EXT else "video" if e in VIDEO_EXT else None)
+            "audio" if e in AUDIO_EXT else "video" if e in VIDEO_EXT else
+            "pdf" if e in PDF_EXT else None)
 
 # ---- embedding --------------------------------------------------------------
 def _vec(resp):
@@ -124,19 +126,46 @@ def expand(paths):
     return sorted(set(out))
 
 # ---- commands ---------------------------------------------------------------
-def _embed_file(f, m):
-    """Return (vector, preview) for one file, or raise. Video is fused multi-frame + audio."""
+def _pdf_items(path):
+    """One item per PDF page: extract text (preferred), else render the page to an
+    image (scanned/figure pages). Returns list of (modality, vector, preview)."""
+    import fitz  # PyMuPDF
+    doc = fitz.open(path)
+    stem = os.path.splitext(os.path.basename(path))[0]
+    os.makedirs(DERIV, exist_ok=True)
+    items = []
+    for i in range(len(doc)):
+        page = doc[i]
+        txt = page.get_text().strip()
+        try:
+            if len(txt) >= 30:                      # text page
+                items.append(("text", embed_text(txt[:8000]),
+                              f"p{i+1}: " + " ".join(txt.split())[:70]))
+            else:                                    # scanned / image-only page
+                img = os.path.join(DERIV, f"{stem}.p{i+1}.png")
+                page.get_pixmap(dpi=150).save(img)
+                items.append(("image", embed_media(img), f"p{i+1} [scanned page]"))
+        except Exception as e:
+            print(f"    skip {os.path.basename(path)} p{i+1}: {e}")
+    if not items:
+        raise RuntimeError("no pages extracted")
+    return items
+
+def _build_items(f, m):
+    """Return list of (modality, vector, preview) for a file; most files -> 1 item."""
     if m == "text":
         txt = open(f, errors="replace").read()
-        return embed_text(txt[:8000]), txt[:80].replace("\n", " ")
+        return [("text", embed_text(txt[:8000]), txt[:80].replace("\n", " "))]
     if m in ("image", "audio"):
-        return embed_media(f), ""
+        return [(m, embed_media(f), "")]
+    if m == "pdf":
+        return _pdf_items(f)
     # video: several frames + audio fused into one vector
     frames, audio = video_parts(f)
     if not frames and not audio:
         raise RuntimeError("ffmpeg extracted no frames or audio")
     parts = frames + ([audio] if audio else [])
-    return embed_fused(parts, f), f"[video: {len(frames)} frames{' + audio' if audio else ''}]"
+    return [("video", embed_fused(parts, f), f"[video: {len(frames)} frames{' + audio' if audio else ''}]")]
 
 def cmd_ingest(args):
     idx, meta = load_store()
@@ -148,14 +177,16 @@ def cmd_ingest(args):
     for f in files:
         m = modality_of(f)
         try:
-            v, preview = _embed_file(f, m)
+            items = _build_items(f, m)
         except Exception as e:
             print(f"  skip {os.path.basename(f)} ({m}): {e}"); continue
-        i = meta["next_id"]; meta["next_id"] += 1
-        bm, bs = item_baseline(v, P)
-        meta["items"][str(i)] = {"path": f, "modality": m, "preview": preview, "bm": bm, "bs": bs}
-        nid.append(i); nvec.append(v)
-        print(f"  +{m:6} id={i}  {os.path.basename(f)}")
+        for mod, v, preview in items:
+            i = meta["next_id"]; meta["next_id"] += 1
+            bm, bs = item_baseline(v, P)
+            meta["items"][str(i)] = {"path": f, "modality": mod, "preview": preview, "bm": bm, "bs": bs}
+            nid.append(i); nvec.append(v)
+        tag = f"{m}({len(items)}p)" if m == "pdf" else m
+        print(f"  +{tag:9} {os.path.basename(f)}")
     if nid:
         idx.add_with_ids(np.vstack(nvec).astype(np.float32), np.array(nid, dtype=np.uint64))
         save_store(idx, meta)

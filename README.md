@@ -83,6 +83,7 @@ The pipeline has four stages.
 
 - **text** (`.txt`, `.md`, ...): the file's contents are read and embedded directly.
 - **images** and **audio** (`.jpg`, `.wav`, ...): the raw file is base64-encoded and embedded as media.
+- **PDF** (`.pdf`): one item **per page** (PyMuPDF). Pages with extractable text are embedded as text (the strongest mode); scanned/image-only pages are rendered to an image and embedded as such. A query lands you on the matching page, not just the file.
 - **video** (`.mp4`, ...): llama.cpp's multimodal stack does not decode video containers, so a raw `.mp4` is rejected. `lcovec` does the decode itself: it uses `ffmpeg` to sample several frames spread across the clip (default 6) plus the audio track, and sends them as **one fused multimodal request** so the model returns a single multi-frame + audio **video** vector. Tune with `LCOVEC_VIDEO_FRAMES` / `LCOVEC_VIDEO_AUDIO_SEC`. This captures the whole clip, not just one frame; the remaining gap vs a true native pipeline is temporal frame-merging (see [Native video](#native-video)). The audio component is subject to the speech caveat below.
 
 Re-running `ingest` skips files already in the index.
@@ -116,7 +117,7 @@ Plain text stays simple: `{"content": "your text"}`. The endpoint is `POST /embe
 - A **CUDA GPU with ~9 GB free VRAM** (built/tested on an RTX 4060 Ti 16 GB). The projector runs on CPU, so CPU-only inference is possible but slow.
 - `git`, `cmake`, a CUDA toolkit (to build the fork).
 - `python3` with `pip`.
-- `ffmpeg` (only for audio/video ingestion).
+- `ffmpeg` (only for audio/video ingestion); `pymupdf` (only for PDF, installed via requirements).
 - ~6 GB disk for the model weights.
 
 This loads the multimodal **embedding** path of Qwen2.5-Omni, which mainline `llama.cpp` and Ollama do not ship. You must build the **[ht-llama.cpp](https://github.com/heiervang-technologies/ht-llama.cpp)** fork.
@@ -179,7 +180,7 @@ Want the canned demo from the top of this README?
 | `lcovec.py reset` | Wipe the index and metadata. |
 | `embedder.sh start \| stop \| status` | Manage the embedding server. |
 
-Recognized extensions: text (`.txt .md .markdown .rst`), image (`.jpg .jpeg .png .gif .bmp .webp`), audio (`.mp3 .wav .m4a .aac .flac .ogg`), video (`.mp4 .mov .mkv .webm .avi`).
+Recognized extensions: text (`.txt .md .markdown .rst`), image (`.jpg .jpeg .png .gif .bmp .webp`), audio (`.mp3 .wav .m4a .aac .flac .ogg`), video (`.mp4 .mov .mkv .webm .avi`), pdf (`.pdf`, page by page).
 
 ---
 
@@ -233,6 +234,7 @@ Raw cosine fails because the spoken-monologue clip is a "text magnet" (high cosi
 | text -> audio (non-speech) | unreliable; use audio-to-audio |
 | text -> video (among videos) | 4/5 with per-item calibration |
 | text -> video (mixed corpus) | weak/noisy for visual clips; speech clips surface |
+| text -> PDF (per page) | strong (text pages use the text mode); lands on the matching page |
 | add / search / delete with stable ids | works (O(1) delete) |
 
 ---
