@@ -223,6 +223,18 @@ The model is language-centric: it aligns audio to words well when the audio carr
 
 ---
 
+## When do I need to re-embed?
+
+You embed each item **once** and reuse the index indefinitely. The index is persisted to `~/.lcovec/store`, so it survives restarts, and search runs on CPU with the embedder unloaded.
+
+- **Adding files:** no re-embed of existing data. `ingest` only embeds files not already in the index.
+- **Querying, restarting, moving the store:** no re-embed. Just point `LCOVEC_STORE` at it.
+- **Changing the embedding model:** **full re-embed required.** Embeddings are model-specific. A vector from one model and a vector from another live in different geometric spaces and are not comparable, even at the same dimensionality, so you cannot search across them or mix them in one index. Switching models (or even a different quantization that changes the model's output) means rebuilding the index from scratch.
+
+In other words: the index is decoupled from the embedder and will store whatever vectors you give it, but the vectors themselves are tied to the model that produced them. This tool is built specifically around LCO-Embedding-Omni (the dimension and multimodal request format are fixed to it); pointing it at a different model takes code changes and a fresh index.
+
+---
+
 ## Configuration
 
 | variable | default | used by |
