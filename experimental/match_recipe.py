@@ -18,7 +18,7 @@ Two steps (the GGUF embedder and the bf16 model don't fit in VRAM together):
 
 Env: LCO_SERVER (capture), LCO_HF_MODEL (match).
 """
-import os, sys, json, numpy as np
+import os, sys, numpy as np
 
 TEXTS = [
     "A fluffy domestic cat grooming itself.", "A small kitten playing with yarn.",
