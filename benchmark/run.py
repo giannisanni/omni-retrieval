@@ -103,3 +103,29 @@ for m, (tot, a, b) in per.items(): print(f"  {m:6}: within {a}/{tot}   mixed {b}
 print(f"\nstrict (exact labeled item): top-1 {t1}/{n} ({100*t1/n:.0f}%)  top-3 {t3}/{n} ({100*t3/n:.0f}%)  MRR {rr/n:.3f}")
 print(f"topic-graded (right topic, any modality): top-1 {gt1}/{n} ({100*gt1/n:.0f}%)  top-3 {gt3}/{n} ({100*gt3/n:.0f}%)  MRR {grr/n:.3f}")
 if missing: print("missing:", missing)
+
+# --- global ranking vs per-modality round-robin merge: recall@5 ---
+def merged_order(q):
+    qv = lcovec.embed_text(q).reshape(1, -1).astype(np.float32)
+    groups = lcovec._ranked_groups(idx, meta, by, qv)           # {m: [(blend,z,cos,id)...]}
+    order = sorted(groups, key=lambda m: groups[m][0][0] if groups[m] else -1e9, reverse=True)
+    out, i = [], 0
+    while any(i < len(groups[m]) for m in order):
+        for m in order:
+            if i < len(groups[m]): out.append(groups[m][i][3])
+        i += 1
+    return out
+
+gr5 = mr5 = 0; pg = {}; pm = {}
+for modality, key, q in M:
+    tgt = set(targets(key))
+    if not tgt: continue
+    g = rank_of(scored(q), lambda r: r in tgt)
+    m_ = rank_of(merged_order(q), lambda r: r in tgt)
+    gr5 += 0 < g <= 5; mr5 += 0 < m_ <= 5
+    pg.setdefault(modality, [0, 0]); pm.setdefault(modality, [0, 0])
+    pg[modality][0] += 1; pg[modality][1] += 0 < g <= 5
+    pm[modality][1] += 0 < m_ <= 5
+print("\nrecall@5  global -> per-modality merge ('query -p'):")
+for m in pg: print(f"  {m:6}: {pg[m][1]}/{pg[m][0]}  ->  {pm[m][1]}/{pg[m][0]}")
+print(f"  overall: {gr5}/{n}  ->  {mr5}/{n}")

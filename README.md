@@ -183,7 +183,7 @@ Want the canned demo from the top of this README?
 | command | description |
 |---|---|
 | `lcovec.py ingest <path>...` | Walk files/dirs, embed by type, add to the index. Re-ingesting skips known sources. |
-| `lcovec.py query "<text>" [-k N]` | Cross-modal search. `-k` is the number of results (default 6). |
+| `lcovec.py query "<text>" [-k N] [-p]` | Cross-modal search. `-k` = number of results (default 6). `-p`/`--per-modality` = round-robin merge so every modality's top hit surfaces (rescues audio/video; see Benchmark). |
 | `lcovec.py stats` | Item counts per modality. |
 | `lcovec.py reset` | Wipe the index and metadata. |
 | `embedder.sh start \| stop \| status` | Manage the embedding server. |
@@ -277,9 +277,22 @@ The two metrics matter because the corpus has deliberate cross-modal topic dupli
 Honest reads of the remaining misses:
 
 - **Most strict misses are relevant siblings, not errors** (caught by the topic-graded metric).
-- **Audio and video still get buried in a text-heavy mixed corpus.** Within their own modality they retrieve fine (audio 2/3, video 3/4), but in the mixed index they sink (ranks ~30-80 of 90): text->audio/video cosines are low and 76 of 90 items are text. Per-item calibration narrows this but cannot overcome a ~25:1 imbalance, and raising `BLEND` (which sharpens text/image) does not rescue them. For balanced cross-modal results, search per-modality and merge top-k - or lower `LCOVEC_BLEND` to lean on the calibration.
+- **Audio and video get buried in a *single* text-heavy ranking** (ranks ~30-80 of 90: text->audio/video cosines are low and 76 of 90 items are text). Neither per-item calibration nor `BLEND` rescues them - but the per-modality merge does (below).
 
-Bottom line: **text, image, and PDF retrieval are strong (within-modality 85%, topic-graded mixed 81%/88%); speech-audio works within its modality; cross-modal audio/video ranking against a large text corpus is the weak spot.**
+### Per-modality merge (`query -p`) rescues sparse modalities
+
+A single global ranking buries audio/video; round-robin merging each modality's top hits guarantees representation. Effect on **recall@5** (target in the top 5):
+
+| modality | global | merged (`-p`) |
+|---|---|---|
+| audio | 0/3 | **2/3** |
+| video | 2/4 | **3/4** |
+| image | 6/7 | 7/7 |
+| **overall recall@5** | 20/26 (77%) | **24/26 (92%)** |
+
+top-1 is unchanged (18/26): the merge does not hurt the best-match case, it just ensures every modality's best hit appears in the top results. Use `-p` when the answer might be a clip rather than a doc.
+
+Bottom line: **text, image, and PDF retrieval are strong (within-modality 85%, topic-graded mixed 81%/88%); speech-audio works; and the per-modality merge makes audio/video findable (recall@5 77% -> 92%) despite the cross-modal gap.**
 
 ---
 

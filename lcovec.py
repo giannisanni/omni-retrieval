@@ -231,25 +231,40 @@ def item_baseline(vec, P):
     cs = P @ _unit(vec).astype(np.float32)
     return float(cs.mean()), float(cs.std() + 1e-9)
 
+def _ranked_groups(idx, meta, by, qv):
+    """Per modality: list of (blend, z, cos, id) sorted desc."""
+    groups = {}
+    for m, ids in by.items():
+        sc, rid = idx.search(qv, k=len(ids), allowlist=np.array(ids, dtype=np.uint64))
+        g = []
+        for s, r in zip(sc[0], rid[0]):
+            it = meta["items"][str(int(r))]
+            z = (float(s) - it.get("bm", 0.0)) / it.get("bs", 1.0)
+            g.append((z + BLEND * float(s), z, float(s), int(r)))
+        g.sort(reverse=True); groups[m] = g
+    return groups
+
 def cmd_query(args):
     idx, meta = load_store()
     if len(idx) == 0: sys.exit("index empty - ingest something first.")
     by = _by_mod(meta)
     qv = embed_text(args.text).reshape(1, -1).astype(np.float32)
-    merged = []
-    for m, ids in by.items():
-        sc, rid = idx.search(qv, k=min(len(ids), max(args.k * 4, 10)),
-                             allowlist=np.array(ids, dtype=np.uint64))
-        for s, r in zip(sc[0], rid[0]):
-            it = meta["items"][str(r)]
-            bm, bs = it.get("bm", 0.0), it.get("bs", 1.0)
-            z = (float(s) - bm) / bs   # how unusual is this cos for THIS item
-            # blend per-item z (cross-modal calibration) with raw cos (absolute
-            # relevance); BLEND tunes the balance (see its definition above).
-            merged.append((z + BLEND * float(s), z, float(s), int(r), m))
-    merged.sort(reverse=True)
-    print(f"query: {args.text!r}\n")
-    for blend, z, s, r, m in merged[:args.k]:
+    groups = _ranked_groups(idx, meta, by, qv)
+    if args.per_modality:
+        # round-robin across modalities (ordered by each modality's best score) so
+        # every modality's top hit surfaces - rescues sparse audio/video that a
+        # single global ranking buries under a large text corpus.
+        order = sorted(groups, key=lambda m: groups[m][0][0] if groups[m] else -1e9, reverse=True)
+        results, i = [], 0
+        while len(results) < args.k and any(i < len(groups[m]) for m in order):
+            for m in order:
+                if i < len(groups[m]): results.append((*groups[m][i], m))
+            i += 1
+        results = results[:args.k]
+    else:
+        results = sorted([(*t, m) for m, g in groups.items() for t in g], reverse=True)[:args.k]
+    print(f"query: {args.text!r}{'  [per-modality merge]' if args.per_modality else ''}\n")
+    for blend, z, s, r, m in results:
         it = meta["items"][str(r)]
         tail = it["preview"] or os.path.basename(it["path"])
         name = os.path.basename(it["path"]) if it["preview"] else ""
@@ -269,7 +284,10 @@ def cmd_reset(args):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(); sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("ingest"); p.add_argument("paths", nargs="+"); p.set_defaults(fn=cmd_ingest)
-    p = sub.add_parser("query");  p.add_argument("text"); p.add_argument("-k", type=int, default=6); p.set_defaults(fn=cmd_query)
+    p = sub.add_parser("query");  p.add_argument("text"); p.add_argument("-k", type=int, default=6)
+    p.add_argument("-p", "--per-modality", action="store_true",
+                   help="round-robin merge so every modality's top hit surfaces")
+    p.set_defaults(fn=cmd_query)
     sub.add_parser("stats").set_defaults(fn=cmd_stats)
     sub.add_parser("reset").set_defaults(fn=cmd_reset)
     a = ap.parse_args(); a.fn(a)
