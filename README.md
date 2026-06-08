@@ -247,6 +247,38 @@ Raw cosine fails because the spoken-monologue clip is a "text magnet" (high cosi
 
 ---
 
+## Benchmark
+
+A larger content-distinct corpus: 8 text/markdown docs, 7 images, 4 arXiv PDFs (68 pages), 3 speech clips, 4 videos = **90 indexed items**, with 26 labeled queries (one per source item; a PDF counts as found if any of its pages ranks). Scoring is the shipped per-item-calibrated `z + cos`. Reproduce with [`benchmark/`](benchmark/) (it fetches the corpus fresh, so numbers vary slightly).
+
+**Within-modality** (find the right item among items of the same type):
+
+| modality | top-1 |
+|---|---|
+| text | 6/8 |
+| image | 6/7 |
+| pdf (page) | 3/4 |
+| audio (speech) | 2/3 |
+| video | 3/4 |
+| **overall** | **20/26 (77%)** |
+
+**Mixed corpus** (all 90 items compete for every query):
+
+| metric | value |
+|---|---|
+| top-1 | 16/26 (62%) |
+| top-3 | 20/26 (77%) |
+| MRR | 0.71 |
+
+Two honest reads of the misses:
+
+- **Most are semantically reasonable, not failures.** The machine-learning text loses to the ML *PDFs*; the Eiffel Tower *image* loses to Paris/France *text*; cat vs dog; the transformer papers (attention/BERT) shade into each other. The embeddings are behaving sensibly.
+- **Audio and video get buried in a text-heavy mixed corpus.** Within their own modality they retrieve fine (audio 2/3, video 3/4), but in the mixed index they sink to ranks ~15-80 of 90 - text->audio/video cosines are low and 76 of 90 items are text. Per-item calibration narrows this but cannot overcome a ~25:1 modality imbalance. If you need every modality represented in one list, search per-modality and merge top-k from each.
+
+Bottom line, at scale: **text, image, and PDF retrieval are strong; speech-audio works; cross-modal audio/video ranking against a large text corpus is the weak spot.**
+
+---
+
 ## Native video
 
 The LCO model architecture (Qwen2.5-Omni) genuinely supports video. The limitation is the **serving layer**, not the model. In the reference pipeline (HF transformers / vLLM), a processor decodes the container, samples frames over time, and extracts audio before the model ever sees it, so "native video" is really frames + audio assembled by the processor.
@@ -309,6 +341,7 @@ omni-retrieval/
     fetch_sample_images.sh # 4 CC images for poc.py
   experimental/          # Path B: transformers / native-video (research, see its README)
     embed_tf.py  compare.py  match_recipe.py  download_hf_model.sh
+  benchmark/             # reproducible multimodal benchmark (download_corpus.py, run.py)
 ```
 
 Index and metadata persist under `~/.lcovec/store` (`index.tvim`, `meta.json`, `derived/`).
