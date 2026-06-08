@@ -246,6 +246,10 @@ This is an engineering proof-of-concept, validated but not a benchmark study. Th
 
 ---
 
+## Contributing
+
+Issues and PRs welcome. Please run `ruff check .` and `shellcheck embedder.sh scripts/*.sh` first (CI runs both). See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Credits
 
 - **LCO-Embedding-Omni** - [model](https://huggingface.co/LCO-Embedding/LCO-Embedding-Omni-3B-2605), [GGUF build](https://huggingface.co/marksverdhei/LCO-Embedding-Omni-3B-2605-GGUF), paper [arXiv:2510.11693](https://arxiv.org/abs/2510.11693). Built on [Qwen2.5-Omni](https://huggingface.co/Qwen/Qwen2.5-Omni-3B).

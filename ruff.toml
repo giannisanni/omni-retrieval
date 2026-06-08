@@ -1,0 +1,10 @@
+# Lint configuration.
+#
+# This codebase is intentionally terse (multiple statements per line, compact
+# one-liners). We therefore lint for *correctness*, not style: pyflakes (F)
+# catches real bugs (undefined names, unused imports, shadowing) and E9 catches
+# syntax/runtime-parse errors. Stylistic rules are deliberately not enforced.
+line-length = 120
+
+[lint]
+select = ["F", "E9"]
