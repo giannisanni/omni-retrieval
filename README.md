@@ -89,7 +89,7 @@ Re-running `ingest` skips files already in the index.
 
 **3. Indexing.** Each vector is stored in a turbovec `IdMapIndex` under a stable uint64 id, while the file's path and modality are kept in a small JSON sidecar. turbovec quantizes every vector to 4 bits per dimension (TurboQuant), which is what lets ~10M items fit in roughly 5 GB of RAM and keeps nearest-neighbor search fast on CPU, with no GPU needed once the corpus is embedded. Ids survive deletion, so a corpus that constantly gains and loses files stays consistent without rebuilds.
 
-**4. Querying, with cross-modal calibration.** Your text query is embedded by the same model, then searched against the index. A naive nearest-neighbor lookup is biased: text-to-text similarities run systematically higher than text-to-image, text-to-audio, or text-to-video, so correct non-text items sink beneath unrelated text. `lcovec` corrects this by estimating each modality's score distribution against a fixed bank of probe queries, standardizing each result against its modality's distribution, and blending that with the raw cosine. This works even for a modality with a single item (one video, one audio clip), so a lone video is still findable. The mechanism is detailed in [The modality gap and how it is fixed](#the-modality-gap-and-how-it-is-fixed).
+**4. Querying, with cross-modal calibration.** Your text query is embedded by the same model, then searched against the index. A naive nearest-neighbor lookup is biased: text-to-text similarities run systematically higher than text-to-image, text-to-audio, or text-to-video, so correct non-text items sink beneath unrelated text. `lcovec` corrects this by calibrating **each item** against a fixed bank of probe queries (computed once at ingest), standardizing each result against its own baseline, and blending with the raw cosine. This works even for a modality with a single item, so a lone video is still findable. The mechanism is detailed in [The modality gap and how it is fixed](#the-modality-gap-and-how-it-is-fixed).
 
 ---
 
@@ -187,17 +187,17 @@ Recognized extensions: text (`.txt .md .markdown .rst`), image (`.jpg .jpeg .png
 
 Embeddings cluster by modality: text-to-text cosines run systematically higher than text-to-image, text-to-audio, or text-to-video, even when the cross-modal match is correct. In a naive single ranked list this buries correct non-text items beneath unrelated text.
 
-`lcovec` calibrates each modality against a fixed bank of diverse probe queries:
+`lcovec` calibrates **each item** against a fixed bank of ~16 diverse probe queries:
 
-1. **Estimate each modality's score distribution.** For a fixed set of ~16 probe queries, search each modality (via turbovec's `allowlist`) and collect the cosines, giving a per-modality `(mean, std)`. This is cached and recomputed only when the index changes.
-2. **Standardize** each result against its modality: `z = (cos - mean) / std`. Because the stats come from the probe bank, not the result set, this works even for a modality with a **single item** (one video, one audio clip) - the case where result-set z-scoring fails and a lone video is unrankable.
-3. **Blend** with raw cosine so a modality's merely-relative-best cannot outrank a genuinely strong match:
+1. **At ingest**, compute each item's baseline: the mean and std of its cosine to the probe bank, stored with the item. (The probe embeddings are cached once.)
+2. **At query**, standardize against that baseline: `z = (cos - mean) / std` - how unusual this match is *for that specific item*.
+3. **Blend** lightly with raw cosine so strong absolute matches (text) stay on top and irrelevant low-baseline items do not float up:
 
    ```text
-   score = z + 3 * cos
+   score = z + cos
    ```
 
-In testing this moves a correct image from rank ~7 to the top of a mixed list, and makes a single video findable by its content (rank 1 for a matching query) while correctly demoting it for unrelated queries.
+Per-*item* (not just per-modality) calibration matters because anisotropy varies *within* a modality. For example a speech-bearing video is a "text magnet" - it has high cosine to almost every text query; subtracting its own baseline cancels that. This also works for a modality with a single item, where result-set z-scoring fails outright. In testing it lifts a correct image to the top of a mixed list and takes video-only retrieval from 2/5 to 4/5 (see below).
 
 ---
 
@@ -214,9 +214,16 @@ Small controlled probes on the reference hardware. These are descriptive, not a 
 | speech (spoken monologue) | 0.097, all content-matching queries beat all distractors (mean 0.084 vs 0.032) | **yes** |
 | sound-effects only (no speech) | 0.038, no separation from distractors | no |
 
-The model is language-centric: it aligns audio to words well when the audio carries **speech**, and poorly for pure sound effects or music. Retrieve non-speech audio by **audio-to-audio** similarity instead of text. Absolute audio cosines stay low (~0.07-0.10 even for matches), which is exactly why the per-modality standardization above matters.
+The model is language-centric: it aligns audio to words well when the audio carries **speech**, and poorly for pure sound effects or music. Retrieve non-speech audio by **audio-to-audio** similarity instead of text. Absolute audio cosines stay low (~0.07-0.10 even for matches), which is exactly why the per-item standardization above matters.
 
-**Video:** raw `.mp4` is rejected by the serving stack (not the model); `lcovec` decodes several frames + audio with `ffmpeg` and fuses them into one video vector (see [Native video](#native-video)). With probe calibration, a single video is findable by its content (rank 1 for a matching query, demoted for unrelated ones).
+**Text -> video** (5 content-distinct clips: cat, train, ocean, cooking, and a spoken tech monologue; `.mp4` decoded to 6 frames + audio and fused). Among videos only, retrieving the correct clip by a content query:
+
+| ranking | accuracy |
+|---|---|
+| raw cosine | 2/5 |
+| per-item probe-calibrated | **4/5** |
+
+Raw cosine fails because the spoken-monologue clip is a "text magnet" (high cosine to every query); per-item calibration cancels that. **In a mixed corpus (videos + text + images), video retrieval is weak**: visual-dominated clips align loosely and noisily to text, so they are out-competed by text/image and do not reliably reach the top results. Only the speech-bearing clip surfaces near the top for its query. Treat fused video as best-effort; text -> image and text -> speech-audio are the dependable cross-modal cases.
 
 | capability | status |
 |---|---|
@@ -224,7 +231,8 @@ The model is language-centric: it aligns audio to words well when the audio carr
 | text -> image | strong |
 | text -> audio (speech) | works (rank-correct, low absolute scores) |
 | text -> audio (non-speech) | unreliable; use audio-to-audio |
-| text -> video | multi-frame + audio fused; findable via probe calibration |
+| text -> video (among videos) | 4/5 with per-item calibration |
+| text -> video (mixed corpus) | weak/noisy for visual clips; speech clips surface |
 | add / search / delete with stable ids | works (O(1) delete) |
 
 ---
@@ -237,7 +245,7 @@ This project serves the GGUF through **llama.cpp's multimodal stack (mtmd)**, wh
 
 What it is *not* yet: true temporal video. mtmd merges at most two consecutive frames (`n_merge_frames <= 2`), so the frames are largely treated as a set of images rather than a time-ordered sequence with full temporal position encoding. For that, serve LCO through transformers or vLLM with the Qwen2.5-Omni processor; a working transformers implementation lives in [`experimental/`](experimental/) (Path B).
 
-Empirical caveat: on a speech-heavy clip, the fused video vector is dominated by the visual frame tokens and under-weights the audio, so its *speech* is retrieved less strongly than a dedicated audio embedding would be. Probe calibration still makes the video findable, but native fused video helps most for motion/visual content, not speech payload. Details in [experimental/README.md](experimental/README.md).
+Empirical caveats from a 5-clip benchmark: among videos, per-item calibration retrieves the right clip 4/5 (raw cosine only 2/5, because a spoken-monologue clip is a text magnet). But in a **mixed** corpus, visual-dominated clips align loosely/noisily to text and are out-competed by text and images; only speech-bearing clips reliably surface. Fused video also dilutes audio when many frames are used. Native fused video helps most for visually-distinct content, not as a drop-in equal of text/image retrieval. Details in [experimental/README.md](experimental/README.md).
 
 ---
 
@@ -245,7 +253,7 @@ Empirical caveat: on a speech-heavy clip, the fused video vector is dominated by
 
 - **VRAM:** ~9 GB resident (Q8 weights 3.4 GB + F16 mmproj 2.5 GB + KV cache + CUDA context). Fits a 16 GB card with room to spare.
 - **Index:** ~512 bytes per vector at 4-bit (~5 GB for 10M items), held in CPU RAM. 2-bit halves it.
-- **Throughput:** text embeds are fast; media embeds run the projector on CPU (~30 s per ~15 s audio clip on an 8-core box). Fine for batch ingestion, not for high-QPS media ingest. The first query after the index changes also embeds ~16 probe queries to recalibrate (cached afterwards).
+- **Throughput:** text embeds are fast; media embeds run the projector on CPU (~30 s per ~15 s audio clip on an 8-core box). Fine for batch ingestion, not for high-QPS media ingest. Per-item calibration is computed at ingest (the ~16 probe queries are embedded once), so querying adds no probe overhead.
 - **Context:** 8192 tokens (`embedder.sh`). Audio is ~100 tokens/second; fused video uses `LCOVEC_VIDEO_FRAMES` frames (~256 tokens each) plus `LCOVEC_VIDEO_AUDIO_SEC` of audio, kept within this budget.
 
 ---

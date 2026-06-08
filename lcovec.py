@@ -143,6 +143,7 @@ def cmd_ingest(args):
     known = {v["path"] for v in meta["items"].values()}
     files = [f for f in expand(args.paths) if modality_of(f) and f not in known]
     if not files: print("nothing new to ingest."); return
+    P = probe_matrix()   # for per-item baseline calibration
     nid, nvec = [], []
     for f in files:
         m = modality_of(f)
@@ -151,7 +152,8 @@ def cmd_ingest(args):
         except Exception as e:
             print(f"  skip {os.path.basename(f)} ({m}): {e}"); continue
         i = meta["next_id"]; meta["next_id"] += 1
-        meta["items"][str(i)] = {"path": f, "modality": m, "preview": preview}
+        bm, bs = item_baseline(v, P)
+        meta["items"][str(i)] = {"path": f, "modality": m, "preview": preview, "bm": bm, "bs": bs}
         nid.append(i); nvec.append(v)
         print(f"  +{m:6} id={i}  {os.path.basename(f)}")
     if nid:
@@ -164,9 +166,10 @@ def _by_mod(meta):
     for sid, v in meta["items"].items(): by.setdefault(v["modality"], []).append(int(sid))
     return by
 
-# Diverse probe queries used to estimate each modality's score distribution, so a
-# modality with a single item (one video, one audio clip) can still be calibrated
-# against the cross-modal gap. (Result-set z-scoring fails for singletons.)
+# Diverse probe queries used to estimate each ITEM's baseline cosine to text.
+# Subtracting that baseline closes the cross-modal gap AND cancels per-item
+# anisotropy (e.g. a speech-bearing video that is a "text magnet" with high
+# cosine to every query). Computed once per item at ingest; works for singletons.
 PROBES = [
     "a photograph of an animal", "a city skyline at night", "a person speaking",
     "a piece of music playing", "a financial report", "a cooking recipe",
@@ -175,42 +178,39 @@ PROBES = [
     "computer code on a screen", "a news broadcast", "a scientific experiment",
     "a product advertisement",
 ]
+PROBES_F = os.path.join(STORE, "probes.npy")
 
-def _calibration(idx, by):
-    """Per-modality (mean, std) of cosine to a fixed probe-query bank."""
-    pv = np.vstack([embed_text(p) for p in PROBES]).astype(np.float32)
-    stats = {}
-    for m, ids in by.items():
-        sc, _ = idx.search(pv, k=len(ids), allowlist=np.array(ids, dtype=np.uint64))
-        flat = np.asarray(sc, dtype=np.float64).reshape(-1)
-        stats[m] = [float(flat.mean()), float(flat.std() + 1e-9)]
-    return stats
+def _unit(v): return v / (np.linalg.norm(v) + 1e-9)
 
-def _get_calibration(idx, meta, by):
-    cal = meta.get("calib")
-    if not cal or cal.get("n") != len(idx) or set(cal.get("stats", {})) != set(by):
-        print("  (calibrating modalities against probe queries ...)")
-        meta["calib"] = {"n": len(idx), "stats": _calibration(idx, by)}
-        json.dump(meta, open(META_F, "w"), indent=0)
-    return meta["calib"]["stats"]
+def probe_matrix():
+    """Embed the probe bank once and cache it (shape: len(PROBES) x DIM, unit rows)."""
+    if os.path.exists(PROBES_F):
+        return np.load(PROBES_F)
+    P = np.vstack([_unit(embed_text(p)) for p in PROBES]).astype(np.float32)
+    os.makedirs(STORE, exist_ok=True); np.save(PROBES_F, P)
+    return P
+
+def item_baseline(vec, P):
+    cs = P @ _unit(vec).astype(np.float32)
+    return float(cs.mean()), float(cs.std() + 1e-9)
 
 def cmd_query(args):
     idx, meta = load_store()
     if len(idx) == 0: sys.exit("index empty - ingest something first.")
     by = _by_mod(meta)
-    stats = _get_calibration(idx, meta, by)
     qv = embed_text(args.text).reshape(1, -1).astype(np.float32)
     merged = []
     for m, ids in by.items():
-        mean_m, std_m = stats[m]
         sc, rid = idx.search(qv, k=min(len(ids), max(args.k * 4, 10)),
                              allowlist=np.array(ids, dtype=np.uint64))
         for s, r in zip(sc[0], rid[0]):
-            z = (float(s) - mean_m) / std_m          # how unusual is this cos for modality m
-            # blend the probe-calibrated z (closes the modality gap, works for
-            # singletons) with raw cos (keeps absolute relevance, so a modality's
-            # merely-relative-best cannot outrank a genuinely strong match)
-            merged.append((z + 3.0 * float(s), z, float(s), int(r), m))
+            it = meta["items"][str(r)]
+            bm, bs = it.get("bm", 0.0), it.get("bs", 1.0)
+            z = (float(s) - bm) / bs   # how unusual is this cos for THIS item
+            # light blend with raw cos: per-item z surfaces sparse/low-baseline
+            # modalities (a lone video/audio), the cos term keeps strong absolute
+            # matches (text) on top and damps irrelevant low-baseline creep
+            merged.append((z + 1.0 * float(s), z, float(s), int(r), m))
     merged.sort(reverse=True)
     print(f"query: {args.text!r}\n")
     for blend, z, s, r, m in merged[:args.k]:
@@ -226,7 +226,7 @@ def cmd_stats(args):
         if by.get(m): print(f"  {m:5}: {len(by[m])}")
 
 def cmd_reset(args):
-    for f in (IDX_F, META_F):
+    for f in (IDX_F, META_F, PROBES_F):
         if os.path.exists(f): os.remove(f)
     print("store wiped.")
 
