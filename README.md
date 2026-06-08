@@ -1,6 +1,6 @@
 # omni-retrieval
 
-**Fully-local, air-gapped cross-modal retrieval.** One model embeds text, images, and audio into a single shared vector space; a fast CPU index makes it searchable. Type a description in plain language and get back the matching document, photo, or audio clip - no captions, no tags, no cloud API, nothing leaves the machine.
+**Fully-local, air-gapped cross-modal retrieval across text, images, audio, and video.** One model embeds everything into a single shared vector space (video is handled via its frames and audio track); [turbovec](https://github.com/RyanCodrai/turbovec) then compresses those vectors to 4 bits and runs fast nearest-neighbor search entirely on CPU. Type a description in plain language and get back the matching document, photo, audio clip, or video - no captions, no tags, no cloud API, nothing leaves the machine.
 
 It pairs:
 
